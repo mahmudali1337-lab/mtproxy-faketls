@@ -36,10 +36,16 @@ sudo bash install.sh \
 
 ## Спонсорский баннер «Спонсор прокси»
 
-1. Запусти скрипт без `-t` → получишь `IP:PORT` и `ee`-secret.
-2. [@MTProxybot](https://t.me/MTProxybot) → `/newproxy` → введи `IP:PORT` и `ee`-secret → бот выдаёт `tag` (32 hex).
-3. У того же бота `/setpromo` → выбери канал, который будет светиться в шапке.
-4. Перезапусти: `sudo bash install.sh -d <domain> -t <tag>`.
+1. Запусти скрипт без `-t` → получишь `IP:PORT`, **короткий 32-hex secret** и `ee`-secret для клиентов.
+2. [@MTProxybot](https://t.me/MTProxybot) → `/newproxy`:
+   - Адрес: `IP:PORT`
+   - Secret: **короткий 32-hex** (тот, что для бота — БЕЗ префикса `ee` и БЕЗ домена!).
+     Если отправить `ee...`-вариант — бот ругнётся `Incorrect secret value. It must contain 32 hex characters`.
+3. Бот вернёт `tag` (32 hex). У того же бота `/setpromo` → выбери канал-спонсор.
+4. Перезапусти с тем же секретом и тегом:
+   ```bash
+   sudo bash install.sh -d <domain> -s <короткий-secret> -t <tag>
+   ```
 
 ## docker-compose
 
