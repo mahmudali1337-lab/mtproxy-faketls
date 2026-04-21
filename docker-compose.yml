@@ -1,0 +1,14 @@
+services:
+  mtproxy:
+    image: nineseconds/mtg:2
+    container_name: mtproxy
+    restart: unless-stopped
+    ports:
+      - "${PORT:-443}:3128"
+    command: >
+      run
+      ${SPONSOR_TAG:+-t ${SPONSOR_TAG}}
+      ${SECRET}
+    environment:
+      MTG_NETWORK_BIND: "0.0.0.0:3128"
+      MTG_DEBUG: "false"
