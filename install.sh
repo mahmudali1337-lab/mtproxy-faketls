@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-
+GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; CYAN='\033[0;36m'; NC='\033[0m'
 info()  { echo -e "${CYAN}[*]${NC} $*"; }
 ok()    { echo -e "${GREEN}[+]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
@@ -17,23 +12,28 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-CONTAINER_NAME="${CONTAINER_NAME:-mtproxy}"
-IMAGE="${IMAGE:-nineseconds/mtg:2}"
+CONTAINER_NAME="${CONTAINER_NAME:-teleproxy}"
+IMAGE="${IMAGE:-ghcr.io/teleproxy/teleproxy:latest}"
 PORT="${PORT:-443}"
-FAKE_TLS_DOMAIN="${FAKE_TLS_DOMAIN:-}"
-SPONSOR_TAG="${SPONSOR_TAG:-}"
+STATS_PORT="${STATS_PORT:-8888}"
+WORKERS="${WORKERS:-1}"
+EE_DOMAIN="${EE_DOMAIN:-}"
+PROXY_TAG="${PROXY_TAG:-}"
 SECRET="${SECRET:-}"
+DATA_DIR="${DATA_DIR:-/var/lib/teleproxy}"
 
 usage() {
   cat <<EOF
 Usage: sudo bash install.sh [options]
 
 Options:
-  -d, --domain <domain>     FakeTLS домен (по умолчанию www.cloudflare.com)
-  -t, --tag <hex>           Спонсорский тег от @MTProxybot (32 hex символа)
-  -p, --port <port>         Порт (по умолчанию 443)
-  -s, --secret <hex>        Использовать готовый hex secret вместо генерации
-      --uninstall           Удалить контейнер и образ
+  -d, --domain <domain>     FakeTLS домен (например www.cloudflare.com)
+  -t, --tag <hex>           Спонсорский тег PROXY_TAG от @MTProxybot (32 hex)
+  -p, --port <port>         Клиентский порт (по умолчанию 443)
+      --stats-port <port>   Порт статистики (по умолчанию 8888)
+  -s, --secret <hex>        Использовать готовый 32-hex secret вместо генерации
+  -w, --workers <N>         Кол-во воркеров (по умолчанию 1)
+      --uninstall           Удалить контейнер, образ и data
   -h, --help                Показать помощь
 EOF
 }
@@ -41,12 +41,14 @@ EOF
 UNINSTALL=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -d|--domain)   FAKE_TLS_DOMAIN="$2"; shift 2;;
-    -t|--tag)      SPONSOR_TAG="$2"; shift 2;;
-    -p|--port)     PORT="$2"; shift 2;;
-    -s|--secret)   SECRET="$2"; shift 2;;
-    --uninstall)   UNINSTALL=1; shift;;
-    -h|--help)     usage; exit 0;;
+    -d|--domain)    EE_DOMAIN="$2"; shift 2;;
+    -t|--tag)       PROXY_TAG="$2"; shift 2;;
+    -p|--port)      PORT="$2"; shift 2;;
+    --stats-port)   STATS_PORT="$2"; shift 2;;
+    -s|--secret)    SECRET="$2"; shift 2;;
+    -w|--workers)   WORKERS="$2"; shift 2;;
+    --uninstall)    UNINSTALL=1; shift;;
+    -h|--help)      usage; exit 0;;
     *) err "Неизвестная опция: $1"; usage; exit 1;;
   esac
 done
@@ -55,6 +57,7 @@ if [[ $UNINSTALL -eq 1 ]]; then
   info "Удаление контейнера ${CONTAINER_NAME}..."
   docker rm -f "${CONTAINER_NAME}" 2>/dev/null || true
   docker image rm "${IMAGE}" 2>/dev/null || true
+  rm -rf "${DATA_DIR}"
   ok "Удалено."
   exit 0
 fi
@@ -71,44 +74,49 @@ install_docker() {
 }
 
 ask_domain() {
-  if [[ -z "${FAKE_TLS_DOMAIN}" ]]; then
-    read -r -p "FakeTLS домен [www.cloudflare.com]: " FAKE_TLS_DOMAIN || true
-    FAKE_TLS_DOMAIN="${FAKE_TLS_DOMAIN:-www.cloudflare.com}"
+  if [[ -z "${EE_DOMAIN}" ]]; then
+    echo
+    warn "FakeTLS-домен — под него маскируется трафик (TLS 1.3)."
+    warn "Должен быть реальный сайт с TLS 1.3 (cloudflare, microsoft, итд)."
+    read -r -p "FakeTLS домен [www.cloudflare.com]: " EE_DOMAIN || true
+    EE_DOMAIN="${EE_DOMAIN:-www.cloudflare.com}"
   fi
 }
 
 ask_tag() {
-  if [[ -z "${SPONSOR_TAG}" ]]; then
+  if [[ -z "${PROXY_TAG}" ]]; then
     echo
-    warn "Спонсорский тег получи у @MTProxybot в Telegram (команда /newproxy)."
-    read -r -p "Спонсорский тег (32 hex, Enter — пропустить): " SPONSOR_TAG || true
+    warn "Спонсорский тег (PROXY_TAG) даёт @MTProxybot после /newproxy."
+    warn "Без него прокси работает, но без баннера спонсорского канала."
+    read -r -p "PROXY_TAG (32 hex, Enter — пропустить): " PROXY_TAG || true
   fi
-  if [[ -n "${SPONSOR_TAG}" && ! "${SPONSOR_TAG}" =~ ^[0-9a-fA-F]{32}$ ]]; then
-    err "Тег должен быть 32 hex символа."
+  if [[ -n "${PROXY_TAG}" && ! "${PROXY_TAG}" =~ ^[0-9a-fA-F]{32}$ ]]; then
+    err "PROXY_TAG должен быть 32 hex символа."
     exit 1
   fi
 }
 
 generate_secret() {
   if [[ -n "${SECRET}" ]]; then
+    if [[ ! "${SECRET}" =~ ^[0-9a-fA-F]{32}$ ]]; then
+      err "SECRET должен быть 32 hex символа."
+      exit 1
+    fi
     ok "Использую переданный secret."
     return
   fi
-  info "Генерирую FakeTLS secret для домена ${FAKE_TLS_DOMAIN}..."
-  SECRET="$(docker run --rm "${IMAGE}" generate-secret "${FAKE_TLS_DOMAIN}")"
-  if [[ -z "${SECRET}" ]]; then
-    err "Не удалось сгенерировать secret."
-    exit 1
-  fi
+  info "Генерирую 16-байтовый secret..."
+  SECRET="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   ok "Secret: ${SECRET}"
 }
 
 detect_ip() {
   local ip
-  ip="$(curl -fsSL https://api.ipify.org || true)"
-  [[ -z "$ip" ]] && ip="$(curl -fsSL https://ifconfig.me || true)"
+  ip="$(curl -fsSL --max-time 5 https://api.ipify.org || true)"
+  [[ -z "$ip" ]] && ip="$(curl -fsSL --max-time 5 https://icanhazip.com || true)"
+  [[ -z "$ip" ]] && ip="$(curl -fsSL --max-time 5 https://ifconfig.me || true)"
   [[ -z "$ip" ]] && ip="$(hostname -I | awk '{print $1}')"
-  echo "$ip"
+  echo "$ip" | tr -d '[:space:]'
 }
 
 open_firewall() {
@@ -122,31 +130,37 @@ open_firewall() {
 }
 
 run_container() {
+  info "Подтягиваю образ ${IMAGE}..."
+  docker pull "${IMAGE}" >/dev/null
+
   info "Поднимаю контейнер ${CONTAINER_NAME}..."
   docker rm -f "${CONTAINER_NAME}" 2>/dev/null || true
+  mkdir -p "${DATA_DIR}"
+
+  local ext_ip
+  ext_ip="$(detect_ip)"
 
   local args=(
     run -d
     --name "${CONTAINER_NAME}"
     --restart unless-stopped
-    -p "${PORT}:3128"
+    -p "${PORT}:${PORT}"
+    -p "127.0.0.1:${STATS_PORT}:${STATS_PORT}"
+    -v "${DATA_DIR}:/opt/teleproxy/data"
+    --ulimit nofile=65536:65536
+    -e "SECRET=${SECRET}"
+    -e "PORT=${PORT}"
+    -e "STATS_PORT=${STATS_PORT}"
+    -e "WORKERS=${WORKERS}"
+    -e "EE_DOMAIN=${EE_DOMAIN}"
   )
-
-  args+=( -e MTG_DEBUG=false )
-  args+=( -e MTG_NETWORK_BIND="0.0.0.0:3128" )
-  if [[ -n "${SPONSOR_TAG}" ]]; then
-    args+=( -e MTG_PROBE_PROXIED=true )
-  fi
+  [[ -n "${PROXY_TAG}" ]]  && args+=( -e "PROXY_TAG=${PROXY_TAG}" )
+  [[ -n "${ext_ip}" ]]     && args+=( -e "EXTERNAL_IP=${ext_ip}" )
 
   args+=( "${IMAGE}" )
-  args+=( run )
-  if [[ -n "${SPONSOR_TAG}" ]]; then
-    args+=( -t "${SPONSOR_TAG}" )
-  fi
-  args+=( "${SECRET}" )
 
   docker "${args[@]}" >/dev/null
-  sleep 2
+  sleep 3
   if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     err "Контейнер не запустился. Логи:"
     docker logs "${CONTAINER_NAME}" || true
@@ -156,29 +170,42 @@ run_container() {
 }
 
 print_links() {
-  local ip
+  local ip secret_link domain_hex
   ip="$(detect_ip)"
+  domain_hex="$(printf '%s' "${EE_DOMAIN}" | od -An -tx1 | tr -d ' \n')"
+  secret_link="ee${SECRET}${domain_hex}"
+
   echo
   echo "============================================================"
-  ok "MTProxy + FakeTLS поднят!"
+  ok "Teleproxy (MTProto + FakeTLS) поднят!"
   echo "============================================================"
-  echo "  Server : ${ip}"
-  echo "  Port   : ${PORT}"
-  echo "  Secret : ${SECRET}"
-  echo "  Domain : ${FAKE_TLS_DOMAIN}"
-  [[ -n "${SPONSOR_TAG}" ]] && echo "  Tag    : ${SPONSOR_TAG}"
+  echo "  Server     : ${ip}"
+  echo "  Port       : ${PORT}"
+  echo "  Secret     : ${SECRET}"
+  echo "  FakeTLS    : ${EE_DOMAIN}"
+  echo "  TLS Secret : ${secret_link}"
+  [[ -n "${PROXY_TAG}" ]] && echo "  PROXY_TAG  : ${PROXY_TAG}"
+  echo "  Stats      : http://127.0.0.1:${STATS_PORT}/stats (только с сервера)"
   echo "------------------------------------------------------------"
-  echo "  tg://proxy?server=${ip}&port=${PORT}&secret=${SECRET}"
-  echo "  https://t.me/proxy?server=${ip}&port=${PORT}&secret=${SECRET}"
+  echo "  tg://proxy?server=${ip}&port=${PORT}&secret=${secret_link}"
+  echo "  https://t.me/proxy?server=${ip}&port=${PORT}&secret=${secret_link}"
   echo "============================================================"
   echo
-  warn "Если указан спонсорский тег — подтверди прокси у @MTProxybot (/setpromo по той же ссылке)."
+  if [[ -z "${PROXY_TAG}" ]]; then
+    warn "Чтобы получить спонсорский баннер:"
+    warn "  1) @MTProxybot → /newproxy → введи ${ip}:${PORT} и secret ${secret_link}"
+    warn "  2) Бот вернёт PROXY_TAG → перезапусти: sudo bash install.sh -d ${EE_DOMAIN} -t <тег>"
+    warn "  3) /setpromo у того же бота — выбери канал-спонсор."
+  fi
+  echo
+  echo "Логи:        docker logs -f ${CONTAINER_NAME}"
+  echo "Перезапуск:  docker restart ${CONTAINER_NAME}"
+  echo "Удалить:     sudo bash install.sh --uninstall"
 }
 
 main() {
   install_docker
   ask_domain
-  docker pull "${IMAGE}" >/dev/null
   generate_secret
   ask_tag
   open_firewall

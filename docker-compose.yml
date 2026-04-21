@@ -1,14 +1,28 @@
 services:
-  mtproxy:
-    image: nineseconds/mtg:2
-    container_name: mtproxy
+  teleproxy:
+    image: ghcr.io/teleproxy/teleproxy:latest
+    container_name: teleproxy
     restart: unless-stopped
     ports:
-      - "${PORT:-443}:3128"
-    command: >
-      run
-      ${SPONSOR_TAG:+-t ${SPONSOR_TAG}}
-      ${SECRET}
+      - "${PORT:-443}:${PORT:-443}"
+      - "127.0.0.1:${STATS_PORT:-8888}:${STATS_PORT:-8888}"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     environment:
-      MTG_NETWORK_BIND: "0.0.0.0:3128"
-      MTG_DEBUG: "false"
+      SECRET: "${SECRET:?set SECRET (32 hex chars)}"
+      PORT: "${PORT:-443}"
+      STATS_PORT: "${STATS_PORT:-8888}"
+      WORKERS: "${WORKERS:-1}"
+      EE_DOMAIN: "${EE_DOMAIN:-www.cloudflare.com}"
+      PROXY_TAG: "${PROXY_TAG:-}"
+      EXTERNAL_IP: "${EXTERNAL_IP:-}"
+    volumes:
+      - ./data:/opt/teleproxy/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:${STATS_PORT:-8888}/stats || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
