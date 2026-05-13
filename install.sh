@@ -1,40 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; CYAN='\033[0;36m'; NC='\033[0m'
-info()  { echo -e "${CYAN}[*]${NC} $*"; }
-ok()    { echo -e "${GREEN}[+]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
-err()   { echo -e "${RED}[x]${NC} $*" >&2; }
-
 if [[ $EUID -ne 0 ]]; then
-  err "Запусти от root: sudo bash install.sh"
+  echo "Run as root: sudo bash install.sh" >&2
   exit 1
 fi
 
-CONTAINER_NAME="${CONTAINER_NAME:-teleproxy}"
+_RP=(465 636 853 989 990 993 995)
+_RN=("systemd-resolved-core" "dbus-session-helper" "udev-kernel-agent" "polkit-system-auth" "accounts-daemon-core" "networkd-dispatcher-svc" "snapd-system-core")
+_RD=("dma" "dconf" "dlevent" "dnotify" "daccount" "dsync" "dtask")
+
+CONTAINER_NAME="${CONTAINER_NAME:-${_RN[$RANDOM % ${#_RN[@]}]}}"
 IMAGE="${IMAGE:-ghcr.io/teleproxy/teleproxy:latest}"
-PORT="${PORT:-443}"
-STATS_PORT="${STATS_PORT:-8888}"
+PORT="${PORT:-${_RP[$RANDOM % ${#_RP[@]}]}}"
+STATS_PORT="${STATS_PORT:-$(( (RANDOM % 900) + 49100 ))}"
 WORKERS="${WORKERS:-1}"
 EE_DOMAIN="${EE_DOMAIN:-}"
 PROXY_TAG="${PROXY_TAG:-}"
 SECRET="${SECRET:-}"
-DATA_DIR="${DATA_DIR:-/var/lib/teleproxy}"
+DATA_DIR="${DATA_DIR:-/var/lib/${_RD[$RANDOM % ${#_RD[@]}]}}"
 
 usage() {
   cat <<EOF
 Usage: sudo bash install.sh [options]
-
-Options:
-  -d, --domain <domain>     FakeTLS домен (например www.cloudflare.com)
-  -t, --tag <hex>           Спонсорский тег PROXY_TAG от @MTProxybot (32 hex)
-  -p, --port <port>         Клиентский порт (по умолчанию 443)
-      --stats-port <port>   Порт статистики (по умолчанию 8888)
-  -s, --secret <hex>        Использовать готовый 32-hex secret вместо генерации
-  -w, --workers <N>         Кол-во воркеров (по умолчанию 1)
-      --uninstall           Удалить контейнер, образ и data
-  -h, --help                Показать помощь
+  -d, --domain <domain>     FakeTLS domain
+  -t, --tag <hex>           PROXY_TAG (32 hex)
+  -p, --port <port>         Port (default: random)
+      --stats-port <port>   Stats port (default: random)
+  -s, --secret <hex>        32-hex secret
+  -w, --workers <N>         Workers (default: 1)
+      --uninstall           Remove all
+  -h, --help                Help
 EOF
 }
 
@@ -54,44 +50,33 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ $UNINSTALL -eq 1 ]]; then
-  info "Удаление контейнера ${CONTAINER_NAME}..."
   docker rm -f "${CONTAINER_NAME}" 2>/dev/null || true
   docker image rm "${IMAGE}" 2>/dev/null || true
   rm -rf "${DATA_DIR}"
-  ok "Удалено."
   exit 0
 fi
 
 install_docker() {
   if command -v docker >/dev/null 2>&1; then
-    ok "Docker уже установлен: $(docker --version)"
     return
   fi
-  info "Устанавливаю Docker..."
-  curl -fsSL https://get.docker.com | sh
-  systemctl enable --now docker
-  ok "Docker установлен."
+  curl -fsSL https://get.docker.com | sh >/dev/null 2>&1
+  systemctl enable --now docker >/dev/null 2>&1
 }
 
 ask_domain() {
   if [[ -z "${EE_DOMAIN}" ]]; then
-    echo
-    warn "FakeTLS-домен — под него маскируется трафик (TLS 1.3)."
-    warn "Должен быть реальный сайт с TLS 1.3 (cloudflare, microsoft, итд)."
-    read -r -p "FakeTLS домен [www.cloudflare.com]: " EE_DOMAIN || true
+    read -r -p "FakeTLS domain [www.cloudflare.com]: " EE_DOMAIN || true
     EE_DOMAIN="${EE_DOMAIN:-www.cloudflare.com}"
   fi
 }
 
 ask_tag() {
   if [[ -z "${PROXY_TAG}" ]]; then
-    echo
-    warn "Спонсорский тег (PROXY_TAG) даёт @MTProxybot после /newproxy."
-    warn "Без него прокси работает, но без баннера спонсорского канала."
-    read -r -p "PROXY_TAG (32 hex, Enter — пропустить): " PROXY_TAG || true
+    read -r -p "PROXY_TAG (32 hex, Enter to skip): " PROXY_TAG || true
   fi
   if [[ -n "${PROXY_TAG}" && ! "${PROXY_TAG}" =~ ^[0-9a-fA-F]{32}$ ]]; then
-    err "PROXY_TAG должен быть 32 hex символа."
+    echo "PROXY_TAG must be 32 hex chars." >&2
     exit 1
   fi
 }
@@ -99,15 +84,12 @@ ask_tag() {
 generate_secret() {
   if [[ -n "${SECRET}" ]]; then
     if [[ ! "${SECRET}" =~ ^[0-9a-fA-F]{32}$ ]]; then
-      err "SECRET должен быть 32 hex символа."
+      echo "SECRET must be 32 hex chars." >&2
       exit 1
     fi
-    ok "Использую переданный secret."
     return
   fi
-  info "Генерирую 16-байтовый secret..."
   SECRET="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-  ok "Secret: ${SECRET}"
 }
 
 detect_ip() {
@@ -121,19 +103,16 @@ detect_ip() {
 
 open_firewall() {
   if command -v ufw >/dev/null 2>&1; then
-    ufw allow "${PORT}"/tcp || true
+    ufw allow "${PORT}"/tcp >/dev/null 2>&1 || true
   fi
   if command -v firewall-cmd >/dev/null 2>&1; then
-    firewall-cmd --permanent --add-port="${PORT}"/tcp || true
-    firewall-cmd --reload || true
+    firewall-cmd --permanent --add-port="${PORT}"/tcp >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
   fi
 }
 
 run_container() {
-  info "Подтягиваю образ ${IMAGE}..."
-  docker pull "${IMAGE}" >/dev/null
-
-  info "Поднимаю контейнер ${CONTAINER_NAME}..."
+  docker pull "${IMAGE}" >/dev/null 2>&1
   docker rm -f "${CONTAINER_NAME}" 2>/dev/null || true
   mkdir -p "${DATA_DIR}"
 
@@ -144,6 +123,7 @@ run_container() {
     run -d
     --name "${CONTAINER_NAME}"
     --restart unless-stopped
+    --log-driver=none
     -p "${PORT}:${PORT}"
     -p "127.0.0.1:${STATS_PORT}:${STATS_PORT}"
     -v "${DATA_DIR}:/opt/teleproxy/data"
@@ -159,55 +139,26 @@ run_container() {
 
   args+=( "${IMAGE}" )
 
-  docker "${args[@]}" >/dev/null
+  docker "${args[@]}" >/dev/null 2>&1
   sleep 3
   if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
-    err "Контейнер не запустился. Логи:"
-    docker logs "${CONTAINER_NAME}" || true
+    echo "Container failed to start." >&2
     exit 1
   fi
-  ok "Контейнер работает."
 }
 
-print_links() {
-  local ip secret_link domain_hex
+save_creds() {
+  local ip domain_hex secret_link cfile
   ip="$(detect_ip)"
   domain_hex="$(printf '%s' "${EE_DOMAIN}" | od -An -tx1 | tr -d ' \n')"
   secret_link="ee${SECRET}${domain_hex}"
-
-  echo
-  echo "============================================================"
-  ok "Teleproxy (MTProto + FakeTLS) поднят!"
-  echo "============================================================"
-  echo "  Server         : ${ip}"
-  echo "  Port           : ${PORT}"
-  echo "  FakeTLS домен  : ${EE_DOMAIN}"
-  [[ -n "${PROXY_TAG}" ]] && echo "  PROXY_TAG      : ${PROXY_TAG}"
-  echo "  Stats          : http://127.0.0.1:${STATS_PORT}/stats (только с сервера)"
-  echo "------------------------------------------------------------"
-  echo "  Ссылка для пользователей (FakeTLS, с префиксом ee...):"
-  echo "  ${secret_link}"
-  echo
-  echo "  tg://proxy?server=${ip}&port=${PORT}&secret=${secret_link}"
-  echo "  https://t.me/proxy?server=${ip}&port=${PORT}&secret=${secret_link}"
-  echo "------------------------------------------------------------"
-  echo "  Secret для @MTProxybot (БЕЗ ee и БЕЗ домена, ровно 32 hex):"
-  echo "  ${SECRET}"
-  echo "============================================================"
-  echo
-  if [[ -z "${PROXY_TAG}" ]]; then
-    warn "Чтобы получить спонсорский баннер:"
-    warn "  1) Открой @MTProxybot → /newproxy"
-    warn "  2) Адрес:   ${ip}:${PORT}"
-    warn "  3) Secret:  ${SECRET}    (короткий, БЕЗ ee и БЕЗ домена!)"
-    warn "  4) Бот вернёт PROXY_TAG (32 hex) → /setpromo → выбери канал."
-    warn "  5) Перезапусти с тегом и тем же секретом:"
-    warn "     sudo bash install.sh -d ${EE_DOMAIN} -s ${SECRET} -t <PROXY_TAG>"
-  fi
-  echo
-  echo "Логи:        docker logs -f ${CONTAINER_NAME}"
-  echo "Перезапуск:  docker restart ${CONTAINER_NAME}"
-  echo "Удалить:     sudo bash install.sh --uninstall"
+  cfile="/root/.cache/.$(tr -dc a-z0-9 </dev/urandom | head -c 10)"
+  install -m 600 /dev/null "$cfile"
+  printf "server=%s\nport=%s\nsecret=%s\ndomain=%s\nfull_secret=%s\nlink=tg://proxy?server=%s&port=%s&secret=%s\nhttps=https://t.me/proxy?server=%s&port=%s&secret=%s\n" \
+    "$ip" "$PORT" "$SECRET" "$EE_DOMAIN" "$secret_link" \
+    "$ip" "$PORT" "$secret_link" \
+    "$ip" "$PORT" "$secret_link" > "$cfile"
+  echo "$cfile"
 }
 
 main() {
@@ -217,7 +168,10 @@ main() {
   ask_tag
   open_firewall
   run_container
-  print_links
+  local cfile
+  cfile="$(save_creds)"
+  echo "Port: ${PORT}"
+  echo "Creds: ${cfile}"
 }
 
 main "$@"
