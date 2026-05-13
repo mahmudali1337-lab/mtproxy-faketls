@@ -116,6 +116,14 @@ run_container() {
   docker rm -f "${CONTAINER_NAME}" 2>/dev/null || true
   mkdir -p "${DATA_DIR}"
 
+  local conf="${DATA_DIR}/proxy-multi.conf"
+  if [[ ! -f "$conf" ]]; then
+    curl -fsSL --max-time 10 https://core.telegram.org/getProxyConfig -o "$conf" 2>/dev/null || true
+  fi
+  if [[ ! -s "$conf" ]]; then
+    curl -fsSL --max-time 10 https://raw.githubusercontent.com/mahmudali1337-lab/mtproxy-faketls/main/proxy-multi.conf -o "$conf" 2>/dev/null || true
+  fi
+
   local ext_ip
   ext_ip="$(detect_ip)"
 
