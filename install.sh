@@ -131,7 +131,6 @@ run_container() {
     run -d
     --name "${CONTAINER_NAME}"
     --restart unless-stopped
-    --log-driver=none
     --network host
     -v "${DATA_DIR}:/opt/teleproxy/data"
     --ulimit nofile=65536:65536
@@ -147,11 +146,15 @@ run_container() {
   args+=( "${IMAGE}" )
 
   docker "${args[@]}" >/dev/null 2>&1
-  sleep 3
+  sleep 5
   if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    echo "=== CONTAINER LOGS ===" >&2
+    docker logs "${CONTAINER_NAME}" 2>&1 || true
     echo "Container failed to start." >&2
     exit 1
   fi
+  echo "=== CONTAINER LOGS (last 20 lines) ==="
+  docker logs --tail 20 "${CONTAINER_NAME}" 2>&1 || true
 }
 
 save_creds() {
