@@ -124,8 +124,8 @@ run_container() {
     --name "${CONTAINER_NAME}"
     --restart unless-stopped
     --log-driver=none
-    -p "${PORT}:${PORT}"
-    -p "127.0.0.1:${STATS_PORT}:${STATS_PORT}"
+    -p "${PORT}:443"
+    -p "127.0.0.1:${STATS_PORT}:8888"
     -v "${DATA_DIR}:/opt/teleproxy/data"
     --ulimit nofile=65536:65536
     -e "SECRET=${SECRET}"
