@@ -58,10 +58,13 @@ fi
 
 install_docker() {
   if command -v docker >/dev/null 2>&1; then
+    echo "[*] Docker already installed: $(docker --version)"
     return
   fi
-  curl -fsSL https://get.docker.com | sh >/dev/null 2>&1
-  systemctl enable --now docker >/dev/null 2>&1
+  echo "[*] Installing Docker..."
+  curl -fsSL https://get.docker.com | sh
+  systemctl enable --now docker
+  echo "[+] Docker installed."
 }
 
 ask_domain() {
@@ -102,27 +105,36 @@ detect_ip() {
 }
 
 open_firewall() {
+  echo "[*] Opening firewall port ${PORT}..."
   if command -v ufw >/dev/null 2>&1; then
-    ufw allow "${PORT}"/tcp >/dev/null 2>&1 || true
+    ufw allow "${PORT}"/tcp || true
   fi
   if command -v firewall-cmd >/dev/null 2>&1; then
-    firewall-cmd --permanent --add-port="${PORT}"/tcp >/dev/null 2>&1 || true
-    firewall-cmd --reload >/dev/null 2>&1 || true
+    firewall-cmd --permanent --add-port="${PORT}"/tcp || true
+    firewall-cmd --reload || true
   fi
 }
 
 run_container() {
-  docker pull "${IMAGE}" >/dev/null 2>&1
+  echo "[*] Pulling image ${IMAGE}..."
+  docker pull "${IMAGE}"
   docker rm -f "${CONTAINER_NAME}" 2>/dev/null || true
   mkdir -p "${DATA_DIR}"
 
   local conf="${DATA_DIR}/proxy-multi.conf"
   if [[ ! -f "$conf" ]]; then
-    curl -fsSL --max-time 10 https://core.telegram.org/getProxyConfig -o "$conf" 2>/dev/null || true
+    echo "[*] Downloading proxy-multi.conf from core.telegram.org..."
+    curl -fsSL --max-time 10 https://core.telegram.org/getProxyConfig -o "$conf" || true
   fi
   if [[ ! -s "$conf" ]]; then
-    curl -fsSL --max-time 10 https://raw.githubusercontent.com/mahmudali1337-lab/mtproxy-faketls/main/proxy-multi.conf -o "$conf" 2>/dev/null || true
+    echo "[!] Falling back to GitHub mirror..."
+    curl -fsSL --max-time 10 https://raw.githubusercontent.com/mahmudali1337-lab/mtproxy-faketls/main/proxy-multi.conf -o "$conf" || true
   fi
+  if [[ ! -s "$conf" ]]; then
+    echo "[x] Failed to get proxy-multi.conf!" >&2
+    exit 1
+  fi
+  echo "[+] proxy-multi.conf ready ($(wc -c < "$conf") bytes)"
 
   local ext_ip
   ext_ip="$(detect_ip)"
@@ -145,16 +157,20 @@ run_container() {
 
   args+=( "${IMAGE}" )
 
-  docker "${args[@]}" >/dev/null 2>&1
-  sleep 5
+  echo "[*] Starting container ${CONTAINER_NAME} on port ${PORT}..."
+  docker "${args[@]}"
+  echo "[*] Waiting 8s for startup..."
+  sleep 8
   if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
-    echo "=== CONTAINER LOGS ===" >&2
+    echo "[x] Container crashed! Full logs:" >&2
     docker logs "${CONTAINER_NAME}" 2>&1 || true
-    echo "Container failed to start." >&2
     exit 1
   fi
-  echo "=== CONTAINER LOGS (last 20 lines) ==="
-  docker logs --tail 20 "${CONTAINER_NAME}" 2>&1 || true
+  echo "[+] Container running. Logs:"
+  docker logs "${CONTAINER_NAME}" 2>&1 || true
+  echo
+  echo "[*] Port check:"
+  ss -tlnp | grep "${PORT}" || echo "[!] Port ${PORT} not found in ss output!"
 }
 
 save_creds() {
